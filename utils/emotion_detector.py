@@ -1,19 +1,18 @@
-import numpy as np
-from PIL import Image
 from transformers import pipeline
+import aiohttp
 import asyncio
 from typing import Tuple
 
 class EmotionDetector:
     def __init__(self):
-        # 初始化情感分析模型
+        # 使用更轻量级的模型
         self.image_classifier = pipeline(
             "image-classification", 
-            model="rafalosa/diffusion-emotion"
+            model="DunnBC22/cnn_image_classification_emotion_detection"
         )
         self.text_classifier = pipeline(
             "text-classification",
-            model="finiteautomata/bertweet-base-sentiment-analysis"
+            model="bhadresh-savani/distilbert-base-uncased-emotion"
         )
     
     async def detect(self, image_data: bytes) -> Tuple[str, float]:
@@ -27,9 +26,8 @@ class EmotionDetector:
             results = self.image_classifier(image)
             top_result = results[0]
             return top_result["label"], top_result["score"]
-            
         except Exception as e:
-            print(f"Error in emotion detection: {e}")
+            logger.error(f"情感分析失败: {e}")
             return "neutral", 0.5
     
     async def detect_text_emotion(self, text: str) -> str:
@@ -42,17 +40,17 @@ class EmotionDetector:
             label = results[0]["label"].lower()
             
             # 映射到我们的情感分类
-            if label in ["happy", "joy"]:
-                return "happy"
-            elif label in ["sad", "sorrow"]:
-                return "sad"
-            elif label in ["angry", "disgust"]:
-                return "angry"
-            elif label in ["surprise"]:
-                return "surprised"
-            else:
-                return "neutral"
-                
+            label_mapping = {
+                "happy": "happy",
+                "joy": "happy",
+                "sadness": "sad",
+                "anger": "angry",
+                "surprise": "surprised",
+                "fear": "sad",
+                "love": "happy",
+                "neutral": "neutral"
+            }
+            return label_mapping.get(label, "neutral")
         except Exception as e:
-            print(f"Error in text emotion detection: {e}")
+            logger.error(f"文本情感分析失败: {e}")
             return "neutral"
