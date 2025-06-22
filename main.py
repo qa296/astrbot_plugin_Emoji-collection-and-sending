@@ -1,16 +1,16 @@
 import os
 import random
 import asyncio
-from typing import Dict, List, Optional
+import io
+from typing import Optional, Tuple
 from PIL import Image
-import numpy as np
-import aiohttp
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.core import AstrBotConfig
+from astrbot.api.provider import LLMResponse  # 添加这行导入
 
 # 情感分类标签
 EMOTION_LABELS = {
@@ -85,27 +85,21 @@ class EmotionMemesPlugin(Star):
 
     async def download_image(self, image_component: Comp.Image) -> Optional[bytes]:
         """下载图片"""
-        url = image_component.url
-        if not url:
-            return None
-            
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        return await resp.read()
+            if hasattr(image_component, 'file') and image_component.file:
+                # 本地文件
+                with open(image_component.file, "rb") as f:
+                    return f.read()
+            elif hasattr(image_component, 'url') and image_component.url:
+                # 远程URL
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(image_component.url) as resp:
+                        if resp.status == 200:
+                            return await resp.read()
+            return None
         except Exception as e:
             logger.error(f"下载图片失败: {e}")
             return None
-
-    async def detect_emotion(self, image_data: bytes) -> tuple:
-        """识别图片情感"""
-        try:
-            # 使用情感分析模型
-            return await self.detector.detect(image_data)
-        except Exception as e:
-            logger.error(f"情感分析失败: {e}")
-            return "neutral", 0.5
 
     @filter.on_llm_response()
     async def send_emotion_meme(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -115,12 +109,16 @@ class EmotionMemesPlugin(Star):
             
         # 分析消息情感
         text = resp.result_chain.get_plain_text()
+        if not text:
+            return
+            
         text_emotion = await self.detector.detect_text_emotion(text)
         
         # 从对应目录随机选择表情包
         emotion_dir = os.path.join(self.data_dir, EMOTION_LABELS[text_emotion])
         if os.path.exists(emotion_dir):
-            memes = [f for f in os.listdir(emotion_dir) if f.endswith(('.jpg', '.jpeg', '.png'))]
+            memes = [f for f in os.listdir(emotion_dir) 
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))]
             if memes:
                 selected_meme = random.choice(memes)
                 meme_path = os.path.join(emotion_dir, selected_meme)
