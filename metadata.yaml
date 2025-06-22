@@ -1,5 +1,5 @@
-name: emotion_memes
-author: YourName
+name: Emoji-collection-and-sending
+author: tianyu
 description: 智能情感表情包收集与发送插件
 version: 1.0.0
-repo_url: https://github.com/qa296/astrbot_plugin_Emoji-collection-and-sending
+repo: https://github.com/qa296/astrbot_plugin_Emoji-collection-and-sending
