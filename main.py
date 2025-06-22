@@ -1,16 +1,17 @@
 import os
 import random
 import asyncio
-import io
+import aiohttp
 from typing import Optional, Tuple
 from PIL import Image
+import io
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
 from astrbot.core import AstrBotConfig
-from astrbot.api.provider import LLMResponse  # 添加这行导入
+from astrbot.api.provider import LLMResponse
 
 # 情感分类标签
 EMOTION_LABELS = {
@@ -48,7 +49,7 @@ class EmotionMemesPlugin(Star):
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def auto_collect_memes(self, event: AstrMessageEvent):
         """自动收集表情包"""
-        if not self.auto_collect:
+        if not self.auto_collect:  # 修复这里，从event改为self
             return
             
         # 检查消息中是否包含图片
@@ -100,6 +101,14 @@ class EmotionMemesPlugin(Star):
         except Exception as e:
             logger.error(f"下载图片失败: {e}")
             return None
+
+    async def detect_emotion(self, image_data: bytes) -> Tuple[str, float]:
+        """识别图片情感"""
+        try:
+            return await self.detector.detect(image_data)
+        except Exception as e:
+            logger.error(f"情感分析失败: {e}")
+            return "neutral", 0.5
 
     @filter.on_llm_response()
     async def send_emotion_meme(self, event: AstrMessageEvent, resp: LLMResponse):
