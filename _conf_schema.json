@@ -1,0 +1,20 @@
+{
+  "auto_collect": {
+    "description": "是否自动收集表情包",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后会自动收集群聊中的表情包图片"
+  },
+  "emotion_threshold": {
+    "description": "情感识别置信度阈值",
+    "type": "float",
+    "default": 0.7,
+    "hint": "只有情感识别置信度高于此值才会分类"
+  },
+  "send_probability": {
+    "description": "表情发送概率",
+    "type": "float",
+    "default": 0.3,
+    "hint": "匹配到情感时发送表情的概率"
+  }
+}
