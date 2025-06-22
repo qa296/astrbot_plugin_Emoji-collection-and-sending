@@ -6,4 +6,4 @@ AstrBot 插件
 
 # 支持
 
-[帮助文档](https://astrbot.app)
+[帮助文档](https://github.com/qa296/astrbot_plugin_Emoji-collection-and-sending)
