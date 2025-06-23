@@ -5,14 +5,15 @@ import random
 import aiohttp
 from PIL import Image
 import io
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
-from astrbot.api.platform import PlatformAdapterType
+from astrbot.api.event.filter import PlatformAdapterType
 from astrbot.core import AstrBotConfig
+from astrbot.api.provider import LLMResponse
 
 # 情感分类映射
 DEFAULT_EMOTIONS = {
@@ -216,16 +217,28 @@ class EmojiCollectionPlugin(Star):
             logger.info(f"自动收集表情: {result}")
 
     @filter.on_llm_response()
-    async def on_llm_response(self, event: AstrMessageEvent, resp: Any):
+    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
         """在LLM响应后自动发送表情"""
         try:
             # 从LLM响应中提取情感关键词
-            response_text = resp.result_chain.get_plain_text()
+            # 安全获取纯文本内容
+            response_text = ""
+            if resp.result_chain:
+                for comp in resp.result_chain.chain:
+                    if isinstance(comp, Comp.Plain):
+                        response_text += comp.text
+            
+            # 如果没有文本内容，则跳过
+            if not response_text:
+                return
+            
             for emotion in self.emotion_map.keys():
                 if emotion in response_text and random.random() < 0.7:  # 70%概率发送表情
                     files = self.emotion_db.get(emotion, [])
                     if files:
                         selected_file = random.choice(files)
+                        # 避免在短时间内连续发送多条消息
+                        await asyncio.sleep(0.5)
                         await event.send(event.chain_result([
                             Comp.Image.fromFileSystem(selected_file)
                         ]))
