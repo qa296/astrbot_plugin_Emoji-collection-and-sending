@@ -1,144 +1,238 @@
 import os
-import random
+import json
 import asyncio
+import random
 import aiohttp
-from typing import Optional, Tuple
 from PIL import Image
 import io
+from typing import Dict, List, Optional, Tuple
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 import astrbot.api.message_components as Comp
+from astrbot.api.platform import PlatformAdapterType
 from astrbot.core import AstrBotConfig
-from astrbot.api.provider import LLMResponse
 
-# 情感分类标签
-EMOTION_LABELS = {
-    "happy": "高兴",
-    "sad": "悲伤", 
-    "angry": "生气",
-    "surprised": "惊讶",
-    "neutral": "中性"
+# 情感分类映射
+DEFAULT_EMOTIONS = {
+    "高兴": "happy",
+    "悲伤": "sad",
+    "生气": "angry",
+    "惊讶": "surprised",
+    "喜爱": "love",
+    "厌恶": "disgust"
 }
 
-@register("emotion_memes", "YourName", "智能情感表情包插件", "1.0.0")
-class EmotionMemesPlugin(Star):
+@register("emoji-collection", "tianyu", "基于多模态AI的表情收集与发送插件", "1.0.0")
+class EmojiCollectionPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.auto_collect = config.get("auto_collect", True)
-        self.emotion_threshold = config.get("emotion_threshold", 0.7)
-        self.send_probability = config.get("send_probability", 0.3)
+        self.ollama_api_url = self.config.get("ollama_api_url", "http://localhost:11434")
+        self.ollama_model = self.config.get("ollama_model", "llava")
+        self.auto_collect = self.config.get("auto_collect", True)
+        self.emotion_map = self.config.get("default_emotions", DEFAULT_EMOTIONS)
         
-        # 初始化数据目录
-        self.data_dir = os.path.join("data", "emotion_memes")
-        os.makedirs(self.data_dir, exist_ok=True)
-        for emotion in EMOTION_LABELS.values():
-            os.makedirs(os.path.join(self.data_dir, emotion), exist_ok=True)
+        # 创建存储目录
+        self.base_dir = os.path.join("data", "plugins_data", "emoji-collection")
+        os.makedirs(self.base_dir, exist_ok=True)
+        
+        # 加载情感数据库
+        self.emotion_db_path = os.path.join(self.base_dir, "emotion_db.json")
+        self.emotion_db = self.load_emotion_db()
+        
+        logger.info(f"EmojiCollection插件已加载，使用模型: {self.ollama_model}")
+
+    def load_emotion_db(self) -> Dict[str, List[str]]:
+        """加载情感数据库"""
+        if os.path.exists(self.emotion_db_path):
+            with open(self.emotion_db_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {emotion: [] for emotion in self.emotion_map.keys()}
+
+    def save_emotion_db(self):
+        """保存情感数据库"""
+        with open(self.emotion_db_path, 'w', encoding='utf-8') as f:
+            json.dump(self.emotion_db, f, ensure_ascii=False, indent=2)
+
+    def get_emotion_dir(self, emotion: str) -> str:
+        """获取情感对应的目录"""
+        emotion_dir = os.path.join(self.base_dir, emotion)
+        os.makedirs(emotion_dir, exist_ok=True)
+        return emotion_dir
+
+    async def analyze_emotion(self, image_data: bytes) -> Optional[str]:
+        """使用Ollama分析图片情感"""
+        try:
+            # 准备请求数据
+            data = {
+                "model": self.ollama_model,
+                "prompt": "这张图片表达了什么情感？请从以下选项中选择一个: " + 
+                          ", ".join(self.emotion_map.keys()) + 
+                          "。只回答情感名称，不要解释。",
+                "images": [image_data],
+                "stream": False
+            }
             
-        # 初始化情感分析模型
-        from utils.emotion_detector import EmotionDetector
-        self.detector = EmotionDetector()
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.ollama_api_url}/api/generate",
+                    json=data
+                ) as response:
+                    if response.status != 200:
+                        logger.error(f"Ollama API错误: {response.status}")
+                        return None
+                    
+                    result = await response.json()
+                    response_text = result.get("response", "").strip()
+                    
+                    # 检查响应是否包含有效情感
+                    for emotion in self.emotion_map.keys():
+                        if emotion in response_text:
+                            return emotion
+                    
+                    logger.warning(f"无法识别的响应: {response_text}")
+                    return None
+        except Exception as e:
+            logger.error(f"情感分析失败: {str(e)}")
+            return None
+
+    async def process_image(self, event: AstrMessageEvent, emotion: Optional[str] = None):
+        """处理收到的图片"""
+        # 获取图片数据
+        image_seg = next((seg for seg in event.get_messages() if isinstance(seg, Comp.Image)), None)
+        if not image_seg:
+            return "未找到图片"
         
-        logger.info("情感表情包插件已加载")
+        # 下载图片
+        image_url = image_seg.url
+        if image_url.startswith("https:"):
+            image_url = image_url.replace("https:", "http:")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url) as response:
+                if response.status != 200:
+                    return "图片下载失败"
+                
+                image_data = await response.read()
+                
+                # 如果未指定情感，使用AI分析
+                if emotion is None:
+                    emotion = await self.analyze_emotion(image_data)
+                    if not emotion:
+                        return "无法识别图片情感"
+                
+                # 检查情感是否有效
+                if emotion not in self.emotion_db:
+                    return f"无效的情感: {emotion}"
+                
+                # 保存图片
+                emotion_dir = self.get_emotion_dir(emotion)
+                file_count = len(os.listdir(emotion_dir)) + 1
+                file_ext = self.detect_image_format(image_data)
+                file_name = f"emoji_{file_count}.{file_ext}"
+                file_path = os.path.join(emotion_dir, file_name)
+                
+                with open(file_path, 'wb') as f:
+                    f.write(image_data)
+                
+                # 更新数据库
+                self.emotion_db[emotion].append(file_path)
+                self.save_emotion_db()
+                
+                return f"已添加 {emotion} 表情: {file_name}"
 
-    async def terminate(self):
-        logger.info("情感表情包插件已卸载")
+    def detect_image_format(self, image_data: bytes) -> str:
+        """检测图片格式"""
+        try:
+            img = Image.open(io.BytesIO(image_data))
+            return img.format.lower() if img.format else "jpg"
+        except:
+            return "jpg"
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def auto_collect_memes(self, event: AstrMessageEvent):
-        """自动收集表情包"""
-        if not self.auto_collect:  # 修复这里，从event改为self
+    @filter.command("emoadd")
+    async def emoadd_command(self, event: AstrMessageEvent, emotion: Optional[str] = None):
+        """添加表情图片"""
+        result = await self.process_image(event, emotion)
+        yield event.plain_result(result)
+
+    @filter.command("emolist")
+    async def emolist_command(self, event: AstrMessageEvent, emotion: str):
+        """列出表情图片"""
+        if emotion not in self.emotion_db:
+            yield event.plain_result(f"无效的情感: {emotion}")
             return
-            
-        # 检查消息中是否包含图片
-        for component in event.message_obj.message:
-            if isinstance(component, Comp.Image):
-                await self.process_and_save_image(component, event)
-    
-    async def process_and_save_image(self, image_component: Comp.Image, event: AstrMessageEvent):
-        """处理并保存图片"""
-        try:
-            # 下载图片
-            image_data = await self.download_image(image_component)
-            if not image_data:
-                return
-                
-            # 情感分析
-            emotion, confidence = await self.detect_emotion(image_data)
-            if confidence < self.emotion_threshold:
-                return
-                
-            # 保存图片到对应情感目录
-            emotion_dir = os.path.join(self.data_dir, EMOTION_LABELS[emotion])
-            existing_files = os.listdir(emotion_dir)
-            filename = f"meme_{len(existing_files)+1}.jpg"
-            filepath = os.path.join(emotion_dir, filename)
-            
-            with open(filepath, "wb") as f:
-                f.write(image_data)
-                
-            logger.info(f"已保存表情包到 {filepath} (情感: {emotion}, 置信度: {confidence:.2f})")
-            
-        except Exception as e:
-            logger.error(f"处理图片失败: {e}")
+        
+        files = self.emotion_db[emotion]
+        if not files:
+            yield event.plain_result(f"没有找到 {emotion} 表情")
+            return
+        
+        file_list = "\n".join([os.path.basename(f) for f in files])
+        yield event.plain_result(f"{emotion} 表情列表:\n{file_list}")
 
-    async def download_image(self, image_component: Comp.Image) -> Optional[bytes]:
-        """下载图片"""
-        try:
-            if hasattr(image_component, 'file') and image_component.file:
-                # 本地文件
-                with open(image_component.file, "rb") as f:
-                    return f.read()
-            elif hasattr(image_component, 'url') and image_component.url:
-                # 远程URL
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(image_component.url) as resp:
-                        if resp.status == 200:
-                            return await resp.read()
-            return None
-        except Exception as e:
-            logger.error(f"下载图片失败: {e}")
-            return None
+    @filter.command("emosend")
+    async def emosend_command(self, event: AstrMessageEvent, emotion: str):
+        """发送随机表情"""
+        if emotion not in self.emotion_db:
+            yield event.plain_result(f"无效的情感: {emotion}")
+            return
+        
+        files = self.emotion_db[emotion]
+        if not files:
+            yield event.plain_result(f"没有找到 {emotion} 表情")
+            return
+        
+        # 随机选择一个表情
+        selected_file = random.choice(files)
+        yield event.chain_result([
+            Comp.Plain(f"{emotion}表情:"),
+            Comp.Image.fromFileSystem(selected_file)
+        ])
 
-    async def detect_emotion(self, image_data: bytes) -> Tuple[str, float]:
-        """识别图片情感"""
-        try:
-            return await self.detector.detect(image_data)
-        except Exception as e:
-            logger.error(f"情感分析失败: {e}")
-            return "neutral", 0.5
+    @filter.command("emohelp")
+    async def emohelp_command(self, event: AstrMessageEvent):
+        """显示帮助信息"""
+        help_text = (
+            "表情收集与发送插件指令:\n"
+            "/emoadd [情感] - 添加表情图片(可选情感)\n"
+            "/emolist <情感> - 列出指定情感的表情\n"
+            "/emosend <情感> - 发送随机表情\n"
+            "/emohelp - 显示帮助信息\n"
+            f"支持的情感: {', '.join(self.emotion_map.keys())}"
+        )
+        yield event.plain_result(help_text)
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def on_group_message(self, event: AstrMessageEvent):
+        """自动收集群消息中的表情"""
+        if not self.auto_collect:
+            return
+        
+        # 检查是否包含图片
+        if any(isinstance(seg, Comp.Image) for seg in event.get_messages()):
+            result = await self.process_image(event)
+            logger.info(f"自动收集表情: {result}")
 
     @filter.on_llm_response()
-    async def send_emotion_meme(self, event: AstrMessageEvent, resp: LLMResponse):
-        """在LLM回复后发送合适的情感表情包"""
-        if random.random() > self.send_probability:
-            return
-            
-        # 分析消息情感
-        text = resp.result_chain.get_plain_text()
-        if not text:
-            return
-            
-        text_emotion = await self.detector.detect_text_emotion(text)
-        
-        # 从对应目录随机选择表情包
-        emotion_dir = os.path.join(self.data_dir, EMOTION_LABELS[text_emotion])
-        if os.path.exists(emotion_dir):
-            memes = [f for f in os.listdir(emotion_dir) 
-                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif'))]
-            if memes:
-                selected_meme = random.choice(memes)
-                meme_path = os.path.join(emotion_dir, selected_meme)
-                yield event.image_result(meme_path)
+    async def on_llm_response(self, event: AstrMessageEvent, resp: Any):
+        """在LLM响应后自动发送表情"""
+        try:
+            # 从LLM响应中提取情感关键词
+            response_text = resp.result_chain.get_plain_text()
+            for emotion in self.emotion_map.keys():
+                if emotion in response_text and random.random() < 0.7:  # 70%概率发送表情
+                    files = self.emotion_db.get(emotion, [])
+                    if files:
+                        selected_file = random.choice(files)
+                        await event.send(event.chain_result([
+                            Comp.Image.fromFileSystem(selected_file)
+                        ]))
+                    break
+        except Exception as e:
+            logger.error(f"自动发送表情失败: {str(e)}")
 
-    @filter.command("emotion_stats")
-    async def show_stats(self, event: AstrMessageEvent):
-        """显示表情包统计信息"""
-        stats = []
-        for emotion in EMOTION_LABELS.values():
-            count = len(os.listdir(os.path.join(self.data_dir, emotion)))
-            stats.append(f"{emotion}: {count}张")
-            
-        yield event.plain_result("表情包统计:\n" + "\n".join(stats))
+    async def terminate(self):
+        """插件卸载时清理资源"""
+        logger.info("表情收集插件已卸载")
