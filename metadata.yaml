@@ -1,5 +1,5 @@
-name:emotion_memes
-author: YourName
-description: 智能情感表情包收集与发送插件
+name: astrbot_plugin_Emoji-collection-and-sending
+author: tianyu
+description: 使用多模态AI收集和发送表情的插件
 version: 1.0.0
 repo: https://github.com/qa296/astrbot_plugin_Emoji-collection-and-sending
